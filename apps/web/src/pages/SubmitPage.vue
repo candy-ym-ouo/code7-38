@@ -188,7 +188,7 @@ async function submit() {
     error.value = "请等待所有图片完成服务端隐私处理。";
     return;
   }
-  if (mediaItems.some((item) => !["ready", "manual_review"].includes(item.status))) {
+  if (mediaItems.some((item) => !["ready", "manual_review", "publishing"].includes(item.status))) {
     error.value = "有图片仍在处理或处理失败。";
     return;
   }

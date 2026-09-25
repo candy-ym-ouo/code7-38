@@ -2,7 +2,7 @@ import { Queue, Worker } from "bullmq";
 import IORedis from "ioredis";
 import { config } from "./config";
 import { pool } from "./db";
-import { processMediaJob, cleanupOriginalMedia, cleanupDeletedMediaObjects, markStaleFeatures, recoverStuckMedia, markUnreferencedMediaDeleted } from "./media-job";
+import { processMediaJob, cleanupOriginalMedia, cleanupDeletedMediaObjects, markStaleFeatures, recoverStuckMedia, recoverStuckPublishing, markUnreferencedMediaDeleted } from "./media-job";
 import { dispatchOutbox, recoverStuckOutbox } from "./outbox";
 import { purgeDeletedAccounts } from "./account-job";
 
@@ -58,6 +58,7 @@ async function maintenanceTick() {
         removeOnFail: 1000
       }), 3_000);
     }
+    await recoverStuckPublishing();
     await cleanupOriginalMedia();
     await markUnreferencedMediaDeleted();
     await cleanupDeletedMediaObjects();

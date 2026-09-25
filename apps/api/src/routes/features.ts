@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { PoolClient } from "pg";
 import { z } from "zod";
 import { createFeatureSchema } from "@map/shared/contracts";
+import { isSubmittableMediaStatus } from "@map/shared/media-state";
 import { query, transaction } from "../db";
 import { AppError, conflict, forbidden, notFound } from "../errors";
 import { optionalAuth, requireAuth, requireVerifiedContributor } from "../auth";
@@ -40,7 +41,7 @@ async function assertMediaUsable(client: PoolClient, ownerId: string, mediaIds: 
     [mediaIds, ownerId]
   );
   if (result.rowCount !== mediaIds.length) throw new AppError(400, "VALIDATION_FAILED", "One or more media items do not belong to this account");
-  const invalid = result.rows.find((row) => !["ready", "manual_review"].includes(row.privacy_status));
+  const invalid = result.rows.find((row) => !isSubmittableMediaStatus(row.privacy_status));
   if (invalid) throw new AppError(409, "MEDIA_NOT_READY", "All media must finish privacy processing before submission", { mediaStatus: invalid.privacy_status });
 }
 

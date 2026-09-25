@@ -58,9 +58,9 @@
 | `POST` | `/media/uploads/:id/complete` | 提交隐私框并启动服务端处理 |
 | `GET` | `/media/:id` | 查询处理状态 |
 | `GET` | `/media/:id/preview` | 审核员获取短期私有预览 |
-| `POST` | `/media/:id/privacy-approve` | 审核员确认隐私并发布派生图 |
-| `POST` | `/media/:id/retry` | 重试失败处理 |
-| `DELETE` | `/media/:id` | 删除媒体对象 |
+| `POST` | `/media/:id/privacy-approve` | 审核员确认隐私并发布派生图；并发确认只有一方成功（409） |
+| `POST` | `/media/:id/retry` | 重试失败处理；并发重试原子认领（409） |
+| `DELETE` | `/media/:id` | 删除媒体对象；发布中（`publishing`）暂不可删（409） |
 
 ## 评论、举报和通知
 
