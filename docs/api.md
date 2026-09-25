@@ -62,6 +62,8 @@
 | `POST` | `/media/:id/retry` | 重试失败处理 |
 | `DELETE` | `/media/:id` | 删除媒体对象 |
 
+`privacy-approve` 通过数据库原子认领保证并发确认只发布一次：后到的请求收到 `409 CONFLICT`；公开对象复制或提交失败时返回 `502 MEDIA_PUBLISH_FAILED`，已复制的对象会被补偿删除，媒体保持私有并可重试。
+
 ## 评论、举报和通知
 
 | 方法 | 路径 | 说明 |

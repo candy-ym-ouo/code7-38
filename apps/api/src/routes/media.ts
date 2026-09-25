@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { mediaUploadCompleteSchema, mediaUploadInitSchema } from "@map/shared/contracts";
+import { MediaPublishError, mediaPublicKeys, publishMediaObjects } from "@map/shared/media-publish";
 import { config } from "../config";
 import { query, transaction } from "../db";
 import { AppError, conflict, forbidden, notFound } from "../errors";
@@ -11,11 +12,11 @@ import {
   createUploadUrl,
   deleteObject,
   getQuarantineMetadata,
-  publishMediaObject,
   publicMediaUrl
 } from "../storage";
 import { enqueueMediaProcessing } from "../queue";
 import { recordAudit } from "../audit";
+import { buildManualReviewPlan, buildManualReviewPorts } from "../media-publish-state";
 
 function extensionForMime(mime: string) {
   if (mime === "image/jpeg") return "jpg";
@@ -202,11 +203,8 @@ export async function mediaRoutes(app: FastifyInstance) {
       privacy_status: string;
       processed_object_key: string | null;
       thumbnail_object_key: string | null;
-      public_object_key: string | null;
-      public_thumbnail_object_key: string | null;
     }>(
-      `SELECT id, privacy_status, processed_object_key, thumbnail_object_key,
-              public_object_key, public_thumbnail_object_key
+      `SELECT id, privacy_status, processed_object_key, thumbnail_object_key
        FROM media_assets WHERE id = $1 AND deleted_at IS NULL`,
       [params.id]
     );
@@ -216,36 +214,30 @@ export async function mediaRoutes(app: FastifyInstance) {
       throw conflict("Media is not waiting for manual privacy approval");
     }
 
-    const publicKey = `media/${params.id}.webp`;
-    const thumbnailKey = `media/${params.id}.thumb.webp`;
+    const plan = buildManualReviewPlan(params.id, media.processed_object_key, media.thumbnail_object_key);
+    const ports = buildManualReviewPorts(params.id, request.user!.id);
     try {
-      await publishMediaObject(media.processed_object_key, publicKey);
-      if (media.thumbnail_object_key) await publishMediaObject(media.thumbnail_object_key, thumbnailKey);
-
-      await transaction(async (client) => {
-        await client.query(
-          `UPDATE media_assets
-           SET privacy_status = 'ready', public_object_key = $2,
-               public_thumbnail_object_key = $3, processed_at = now(), updated_at = now()
-           WHERE id = $1`,
-          [params.id, publicKey, media.thumbnail_object_key ? thumbnailKey : null]
-        );
-        await recordAudit(client, {
-          actorId: request.user!.id,
-          action: "media.privacy_approved",
-          resourceType: "media",
-          resourceId: params.id
-        });
-      });
+      await publishMediaObjects(ports, plan, { abortState: "manual_review" });
     } catch (error) {
-      await Promise.allSettled([
-        deleteObject(config.S3_PUBLIC_BUCKET, publicKey),
-        media.thumbnail_object_key ? deleteObject(config.S3_PUBLIC_BUCKET, thumbnailKey) : Promise.resolve()
-      ]);
-      throw error;
+      if (error instanceof MediaPublishError && error.stage === "claim") {
+        throw conflict(
+          error.state === "ready"
+            ? "Media was already privacy approved"
+            : "Media is not waiting for manual privacy approval"
+        );
+      }
+      // Copy/commit failures: the state machine already compensated and either
+      // returned the row to manual_review or left it in publishing for the
+      // worker reconciler. Surface a 502 so the moderator can retry.
+      throw new AppError(502, "MEDIA_PUBLISH_FAILED", "Publishing public media objects failed; the media remains private. Retry the confirmation.");
     }
 
-    return { status: "ready", url: publicMediaUrl(publicKey), thumbnailUrl: media.thumbnail_object_key ? publicMediaUrl(thumbnailKey) : null };
+    const keys = mediaPublicKeys(params.id);
+    return {
+      status: "ready",
+      url: publicMediaUrl(keys.image),
+      thumbnailUrl: media.thumbnail_object_key ? publicMediaUrl(keys.thumbnail) : null
+    };
   });
 
   app.delete("/media/:id", { preHandler: requireAuth }, async (request) => {
@@ -293,12 +285,18 @@ export async function mediaRoutes(app: FastifyInstance) {
       });
     });
 
+    // Always attempt the deterministic public keys as well: a row that crashed
+    // mid-publish (privacy_status = 'publishing') may have public objects whose
+    // keys were never persisted to the columns.
+    const publicKeys = mediaPublicKeys(params.id);
+    const publicTargets = new Set([publicKeys.image, publicKeys.thumbnail]);
+    if (media.public_object_key) publicTargets.add(media.public_object_key);
+    if (media.public_thumbnail_object_key) publicTargets.add(media.public_thumbnail_object_key);
     const removals = [
       deleteObject(config.S3_QUARANTINE_BUCKET, media.quarantine_object_key),
       media.processed_object_key ? deleteObject(config.S3_QUARANTINE_BUCKET, media.processed_object_key) : Promise.resolve(),
-      media.public_object_key ? deleteObject(config.S3_PUBLIC_BUCKET, media.public_object_key) : Promise.resolve(),
-      media.public_thumbnail_object_key ? deleteObject(config.S3_PUBLIC_BUCKET, media.public_thumbnail_object_key) : Promise.resolve(),
-      media.thumbnail_object_key ? deleteObject(config.S3_QUARANTINE_BUCKET, media.thumbnail_object_key) : Promise.resolve()
+      media.thumbnail_object_key ? deleteObject(config.S3_QUARANTINE_BUCKET, media.thumbnail_object_key) : Promise.resolve(),
+      ...[...publicTargets].map((key) => deleteObject(config.S3_PUBLIC_BUCKET, key))
     ];
     await Promise.allSettled(removals);
     return { status: "deleted" };

@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { PoolClient } from "pg";
 import { z } from "zod";
 import { createFeatureSchema } from "@map/shared/contracts";
+import { mediaPublicKeys } from "@map/shared/media-publish";
 import { query, transaction } from "../db";
 import { AppError, conflict, forbidden, notFound } from "../errors";
 import { optionalAuth, requireAuth, requireVerifiedContributor } from "../auth";
@@ -438,13 +439,22 @@ export async function featureRoutes(app: FastifyInstance) {
       return mediaResult.rows;
     });
 
-    const removals = media.flatMap((item) => [
-      deleteObject(config.S3_QUARANTINE_BUCKET, item.quarantine_object_key),
-      item.processed_object_key ? deleteObject(config.S3_QUARANTINE_BUCKET, item.processed_object_key) : Promise.resolve(),
-      item.thumbnail_object_key ? deleteObject(config.S3_QUARANTINE_BUCKET, item.thumbnail_object_key) : Promise.resolve(),
-      item.public_object_key ? deleteObject(config.S3_PUBLIC_BUCKET, item.public_object_key) : Promise.resolve(),
-      item.public_thumbnail_object_key ? deleteObject(config.S3_PUBLIC_BUCKET, item.public_thumbnail_object_key) : Promise.resolve()
-    ]);
+    // Include the deterministic keys: media deleted while mid-publish
+    // (privacy_status = 'publishing') can have objects whose keys were never
+    // persisted into the columns. S3 deleting a missing key is a no-op.
+    const removals = media.flatMap((item) => {
+      const keys = mediaPublicKeys(item.id);
+      const publicTargets = new Set([keys.image, keys.thumbnail]);
+      if (item.public_object_key) publicTargets.add(item.public_object_key);
+      if (item.public_thumbnail_object_key) publicTargets.add(item.public_thumbnail_object_key);
+      const quarantineTargets = new Set([item.quarantine_object_key, `processed/${item.id}.webp`, `processed/${item.id}.thumb.webp`]);
+      if (item.processed_object_key) quarantineTargets.add(item.processed_object_key);
+      if (item.thumbnail_object_key) quarantineTargets.add(item.thumbnail_object_key);
+      return [
+        ...[...publicTargets].map((key) => deleteObject(config.S3_PUBLIC_BUCKET, key)),
+        ...[...quarantineTargets].map((key) => deleteObject(config.S3_QUARANTINE_BUCKET, key))
+      ];
+    });
     await Promise.allSettled(removals);
     return { status: "deleted" };
   });
